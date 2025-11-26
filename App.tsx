@@ -1,11 +1,18 @@
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Canvas } from '@react-three/fiber';
+import { SoftShadows } from '@react-three/drei';
 import { GameState, ItemType, FallingItemData, Particle } from './types';
-import { GAME_WIDTH, GAME_HEIGHT, PLAYER_WIDTH, PLAYER_HEIGHT, ITEM_SIZE, ITEM_CONFIG, SPAWN_RATE_MS, GRAVITY_BASE } from './constants';
-import EggCharacter from './components/EggCharacter';
-import FallingItem from './components/FallingItem';
+import { GAME_WIDTH, GAME_HEIGHT, PLAYER_WIDTH, ITEM_SIZE, ITEM_CONFIG, SPAWN_RATE_MS, GRAVITY_BASE } from './constants';
+import { Egg3D, Item3D, Particle3D } from './components/Models3D';
 import { generateGameOverMessage, generateRewardRecipe } from './services/geminiService';
 import { soundService } from './services/soundService';
+
+// --- Constants for 3D Mapping ---
+// We map the internal 800x600 logic to a 3D coordinate system approx -10 to 10 width
+const VIEWPORT_WIDTH = 22; 
+const PIXEL_TO_3D = VIEWPORT_WIDTH / GAME_WIDTH; 
+const FLOOR_Y = -5; // Move floor up slightly for better framing
 
 const App: React.FC = () => {
   // --- State ---
@@ -29,7 +36,7 @@ const App: React.FC = () => {
   const targetXRef = useRef(GAME_WIDTH / 2 - PLAYER_WIDTH / 2);
   const isMovingLeft = useRef(false);
   const isMovingRight = useRef(false);
-  const hasCaughtRef = useRef(false); // For catch animation
+  const hasCaughtRef = useRef(false); 
 
   // --- Sound Control ---
   const toggleMute = useCallback((e?: React.MouseEvent) => {
@@ -42,7 +49,6 @@ const App: React.FC = () => {
 
   const spawnItem = useCallback(() => {
     const types = Object.values(ItemType);
-    // Weighted random: Less rocks/burnt toast
     const rand = Math.random();
     let type = ItemType.CROISSANT;
     
@@ -51,13 +57,12 @@ const App: React.FC = () => {
     else if (rand > 0.5) type = ItemType.BAGUETTE;
     else type = ItemType.CROISSANT;
 
-    // Increase difficulty by speed
     const speedMultiplier = 1 + (score / 100); 
 
     const newItem: FallingItemData = {
       id: Date.now() + Math.random(),
       x: Math.random() * (GAME_WIDTH - ITEM_SIZE),
-      y: -ITEM_SIZE,
+      y: -ITEM_SIZE * 4, // Spawn higher up to give more time
       type,
       rotation: Math.random() * 360,
       speed: (Math.random() * 2 + GRAVITY_BASE) * speedMultiplier,
@@ -88,10 +93,9 @@ const App: React.FC = () => {
     const deltaTime = time - lastTimeRef.current;
     lastTimeRef.current = time;
 
-    // 1. Move Player (Smooth LERP)
+    // 1. Move Player
     setPlayerX(prev => {
       const nextX = prev + (targetXRef.current - prev) * 0.15;
-      // Determine direction for animation
       isMovingLeft.current = nextX < prev - 0.5;
       isMovingRight.current = nextX > prev + 0.5;
       return nextX;
@@ -111,17 +115,17 @@ const App: React.FC = () => {
         item.y += item.speed;
         item.rotation += 1;
 
-        // Collision with Player Basket (Approximate hitbox)
-        const basketY = GAME_HEIGHT - PLAYER_HEIGHT + 60; // Basket height offset
+        // Collision Logic Adjusted for 3D Visuals
+        // Visual Basket Y calculation matched to 3D model
+        const catchZoneY = 460;
         
         const hitPlayer = 
-          item.y + ITEM_SIZE > basketY &&
-          item.y < basketY + 40 && // Thin catching zone
-          item.x + ITEM_SIZE > targetXRef.current && 
-          item.x < targetXRef.current + PLAYER_WIDTH;
+          item.y > catchZoneY && 
+          item.y < catchZoneY + 50 && // Height of collision box
+          item.x + ITEM_SIZE > targetXRef.current - 10 && // Wider catch range left
+          item.x < targetXRef.current + PLAYER_WIDTH + 10; // Wider catch range right
 
         if (hitPlayer) {
-          // Handle Hit
           const config = ITEM_CONFIG[item.type];
           
           if (item.type === ItemType.ROCK) {
@@ -130,11 +134,9 @@ const App: React.FC = () => {
                if (l <= 1) setGameState(GameState.GAME_OVER);
                return l - 1;
              });
-             // Screen shake effect could go here
           } else if (item.type === ItemType.BURNT_TOAST) {
              soundService.playBad();
              setScore(s => Math.max(0, s + config.score));
-             // No life lost, but bad score and bad sound
           } else {
              soundService.playCatch();
              setScore(s => s + config.score);
@@ -146,14 +148,12 @@ const App: React.FC = () => {
           return; // Remove item
         }
 
-        // Missed Item
-        if (item.y > GAME_HEIGHT) {
+        // Remove if falls below floor
+        if (item.y > GAME_HEIGHT + 100) { 
            if (item.type !== ItemType.ROCK && item.type !== ItemType.BURNT_TOAST) {
-             // Dropped good food
-             // Changed: No longer lose lives for missing. Just a small score penalty.
              setScore(s => Math.max(0, s - 2));
            }
-           return; // Remove item
+           return; 
         }
 
         nextItems.push(item);
@@ -182,7 +182,7 @@ const App: React.FC = () => {
     return () => cancelAnimationFrame(requestRef.current);
   }, [gameState, updateGame]);
 
-  // --- Input Handling ---
+  // --- Input ---
 
   const handleMouseMove = (e: React.MouseEvent | React.TouchEvent) => {
     if (gameState !== GameState.PLAYING || !gameContainerRef.current) return;
@@ -197,200 +197,178 @@ const App: React.FC = () => {
     const rect = gameContainerRef.current.getBoundingClientRect();
     const relativeX = clientX - rect.left;
     
-    // Clamp
     const clampedX = Math.max(0, Math.min(GAME_WIDTH - PLAYER_WIDTH, relativeX * (GAME_WIDTH / rect.width) - PLAYER_WIDTH / 2));
     targetXRef.current = clampedX;
   };
 
-  // --- Game State Management ---
+  // --- Game State Helpers ---
 
   const startGame = () => {
-    soundService.init();
     soundService.playStart();
     setScore(0);
     setLives(3);
     setItems([]);
     setParticles([]);
+    setGameState(GameState.PLAYING);
+    setPlayerX(GAME_WIDTH / 2 - PLAYER_WIDTH / 2);
     setAiMessage("");
     setAiRecipe("");
-    setGameState(GameState.PLAYING);
-    lastTimeRef.current = performance.now();
   };
 
-  const handleGameOver = useCallback(async () => {
-    soundService.playGameOver();
-    setGameState(GameState.LOADING_AI);
-    const [message, recipe] = await Promise.all([
-      generateGameOverMessage(score),
-      score > 50 ? generateRewardRecipe(score) : Promise.resolve("")
-    ]);
-    setAiMessage(message);
-    setAiRecipe(recipe);
-    setGameState(GameState.GAME_OVER);
-  }, [score]);
-
-  // Watch for Game Over trigger from the loop (state change)
   useEffect(() => {
-    if (gameState === GameState.GAME_OVER && !aiMessage) {
-        handleGameOver();
+    if (gameState === GameState.GAME_OVER) {
+       soundService.playGameOver();
+       // Trigger AI generation
+       setGameState(GameState.LOADING_AI);
+       Promise.all([
+         generateGameOverMessage(score),
+         generateRewardRecipe(score)
+       ]).then(([msg, recipe]) => {
+         setAiMessage(msg);
+         setAiRecipe(recipe);
+         setGameState(GameState.GAME_OVER);
+       });
     }
-  }, [gameState, aiMessage, handleGameOver]);
+  }, [gameState, score]);
 
+  // Coordinate mapping helper
+  const pixelTo3DX = (x: number) => ((x / GAME_WIDTH) * VIEWPORT_WIDTH) - (VIEWPORT_WIDTH / 2) + (PLAYER_WIDTH * PIXEL_TO_3D / 2);
 
-  // --- Render ---
+  // Map logic Y to 3D Y. 
+  // Logic Y=0 (Top) maps to 3D Y=8
+  // 3D scale is roughly 0.0275 unit per pixel
+  const pixelTo3DY = (y: number) => 8 - (y * PIXEL_TO_3D);
 
   return (
-    <div className="min-h-screen w-full bg-orange-50 flex items-center justify-center p-4 font-sans relative overflow-hidden">
-      
-      {/* Main Game Container */}
-      <div 
-        ref={gameContainerRef}
-        className="relative bg-white rounded-2xl shadow-2xl overflow-hidden border-4 border-orange-200"
-        style={{ 
-          width: '100%', 
-          maxWidth: `${GAME_WIDTH}px`, 
-          aspectRatio: `${GAME_WIDTH}/${GAME_HEIGHT}`,
-          cursor: gameState === GameState.PLAYING ? 'none' : 'default'
-        }}
-        onMouseMove={handleMouseMove}
-        onTouchMove={handleMouseMove}
-      >
-        {/* Background Decorative Elements */}
-        <div className="absolute top-10 left-10 text-6xl opacity-10 rotate-12">🥖</div>
-        <div className="absolute top-40 right-20 text-6xl opacity-10 -rotate-12">🥐</div>
-        <div className="absolute bottom-20 left-1/4 text-6xl opacity-10 rotate-45">🍞</div>
+    <div 
+      ref={gameContainerRef}
+      className="relative w-full h-full bg-[#fdf6e3] overflow-hidden select-none"
+      onMouseMove={handleMouseMove}
+      onTouchMove={handleMouseMove}
+      onClick={() => soundService.init()}
+    >
+        {/* 3D Scene */}
+        <Canvas shadows camera={{ position: [0, 2, 12], fov: 50 }}>
+           <color attach="background" args={['#fdf6e3']} />
+           <ambientLight intensity={0.8} />
+           <directionalLight 
+             position={[5, 10, 5]} 
+             intensity={1} 
+             castShadow 
+             shadow-mapSize={[1024, 1024]} 
+           />
+           <SoftShadows size={10} samples={10} />
+           
+           <group position={[0, FLOOR_Y, 0]}>
+             {/* Floor */}
+             <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+               <planeGeometry args={[100, 100]} />
+               <shadowMaterial transparent opacity={0.2} />
+             </mesh>
+           </group>
 
-        {/* Game World */}
-        {items.map(item => (
-          <FallingItem key={item.id} {...item} size={ITEM_SIZE} />
-        ))}
+           <Egg3D 
+              position={[pixelTo3DX(playerX), FLOOR_Y, -1]} 
+              isMovingLeft={isMovingLeft.current}
+              isMovingRight={isMovingRight.current}
+              hasCaught={hasCaughtRef.current}
+           />
 
-        {/* Particles */}
-        {particles.map(p => (
-          <div
-            key={p.id}
-            className="absolute rounded-full pointer-events-none"
-            style={{
-              left: p.x,
-              top: p.y,
-              width: 8,
-              height: 8,
-              backgroundColor: p.color,
-              opacity: p.life,
-              transform: `scale(${p.life})`
-            }}
-          />
-        ))}
+           {items.map(item => (
+             <Item3D 
+               key={item.id}
+               position={[pixelTo3DX(item.x), pixelTo3DY(item.y), 0]}
+               type={item.type}
+               rotationZ={item.rotation}
+             />
+           ))}
 
-        {/* Player Character */}
-        <div 
-          className="absolute bottom-0 pointer-events-none will-change-transform"
-          style={{ 
-            left: playerX, 
-            width: PLAYER_WIDTH, 
-            height: PLAYER_HEIGHT,
-          }}
+           {particles.map(p => (
+             <Particle3D 
+               key={p.id} 
+               x={pixelTo3DX(p.x)} 
+               y={pixelTo3DY(p.y)} 
+               color={p.color} 
+               life={p.life}
+             />
+           ))}
+
+        </Canvas>
+
+        {/* UI Overlay */}
+        <div className="absolute top-4 left-4 text-2xl font-bold text-[#5D4037]">
+           Score: {score}
+        </div>
+        <div className="absolute top-4 right-4 text-2xl font-bold text-[#5D4037]">
+           Lives: {'❤️'.repeat(lives)}
+        </div>
+        
+        {/* Mute Button */}
+        <button 
+          onClick={toggleMute}
+          className="absolute bottom-4 right-4 p-2 bg-white/80 rounded-full shadow hover:bg-white"
         >
-          <EggCharacter 
-            width={PLAYER_WIDTH} 
-            height={PLAYER_HEIGHT} 
-            isMovingLeft={isMovingLeft.current}
-            isMovingRight={isMovingRight.current}
-            hasCaught={hasCaughtRef.current}
-          />
-        </div>
+          {isMuted ? '🔇' : '🔊'}
+        </button>
 
-        {/* HUD */}
-        <div className="absolute top-4 left-4 right-4 flex justify-between items-start no-select z-20">
-          <div className="flex gap-4 text-2xl font-bold text-orange-800">
-            <div className="bg-white/80 px-4 py-2 rounded-full shadow-sm border border-orange-100">
-              Score: {score}
-            </div>
-            <div className="bg-white/80 px-4 py-2 rounded-full shadow-sm border border-orange-100">
-              Lives: {'❤️'.repeat(lives)}
-            </div>
-          </div>
-          
-          {/* Mute Button */}
-          <button 
-            onClick={toggleMute}
-            className="bg-white/80 p-2 rounded-full shadow-sm border border-orange-100 text-xl hover:bg-orange-50 transition-colors"
-            title={isMuted ? "Unmute" : "Mute"}
-          >
-            {isMuted ? '🔇' : '🔊'}
-          </button>
-        </div>
-
-        {/* Menus / Overlays */}
+        {/* Menu Overlay */}
         {gameState === GameState.MENU && (
-          <div className="absolute inset-0 bg-orange-100/90 flex flex-col items-center justify-center p-8 text-center z-10">
-            <h1 className="text-5xl md:text-6xl font-black text-orange-600 mb-4 drop-shadow-sm">
-              Eggie's Bakery Catch
-            </h1>
-            <p className="text-xl text-orange-800 mb-8 max-w-md">
-              Catch fresh bread to score points!<br/>
-              <span className="text-red-500 font-bold">Avoid Rocks</span> (they take a life).
-              <br/>
-              <span className="text-sm opacity-75 mt-2 block">(Move your mouse or drag to play)</span>
-            </p>
-            <div className="mb-8">
-               <EggCharacter width={150} height={180} isMovingLeft={false} isMovingRight={false} hasCaught={false} />
-            </div>
-            <button 
-              onClick={startGame}
-              className="bg-orange-500 hover:bg-orange-600 text-white text-2xl font-bold py-4 px-12 rounded-full shadow-lg transform transition hover:scale-105 active:scale-95"
-            >
-              Start Baking!
-            </button>
-          </div>
-        )}
-
-        {(gameState === GameState.GAME_OVER || gameState === GameState.LOADING_AI) && (
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm flex flex-col items-center justify-center p-8 text-center z-10 animate-fade-in">
-            <div className="bg-white rounded-3xl p-8 shadow-2xl max-w-md w-full border-4 border-orange-300">
-              <h2 className="text-4xl font-bold text-gray-800 mb-2">Game Over</h2>
-              <p className="text-2xl font-semibold text-orange-600 mb-6">Final Score: {score}</p>
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm z-10">
+            <div className="bg-white p-8 rounded-2xl shadow-xl text-center border-4 border-[#eebb4d] max-w-md">
+              <h1 className="text-4xl font-bold text-[#8B4513] mb-2">Eggie's Bakery</h1>
+              <p className="text-gray-600 mb-6">Help Eggie catch fresh bread!</p>
               
-              {gameState === GameState.LOADING_AI ? (
-                <div className="flex flex-col items-center gap-4 mb-6">
-                   <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-orange-500"></div>
-                   <p className="text-gray-500 italic">Eggie is thinking of something nice to say...</p>
-                </div>
-              ) : (
-                <div className="bg-orange-50 rounded-xl p-6 mb-6 relative overflow-hidden">
-                  <div className="absolute -top-2 -left-2 text-4xl opacity-20">❝</div>
-                  <p className="text-lg text-gray-700 italic font-medium relative z-10">
-                    {aiMessage}
-                  </p>
-                  <div className="absolute -bottom-4 -right-2 text-4xl opacity-20">❞</div>
-                </div>
-              )}
-
-              {aiRecipe && (
-                <div className="text-left bg-yellow-50 border border-yellow-200 p-4 rounded-lg mb-6 text-sm text-yellow-900">
-                  <strong className="block mb-1 text-yellow-700">🏆 Recipe Reward!</strong>
-                  <div className="prose prose-sm prose-yellow">
-                    <pre className="whitespace-pre-wrap font-sans">{aiRecipe}</pre>
-                  </div>
-                </div>
-              )}
+              <div className="flex justify-center gap-4 mb-8 text-sm text-gray-500">
+                <div className="flex flex-col items-center"><span>🥐</span><span>+10</span></div>
+                <div className="flex flex-col items-center"><span>🥖</span><span>+15</span></div>
+                <div className="flex flex-col items-center"><span>🍞</span><span>+5</span></div>
+                <div className="flex flex-col items-center"><span>🍘</span><span>Avoid</span></div>
+                <div className="flex flex-col items-center"><span>🪨</span><span>Hurt</span></div>
+              </div>
 
               <button 
                 onClick={startGame}
-                className="w-full bg-orange-500 hover:bg-orange-600 text-white text-xl font-bold py-3 px-8 rounded-xl shadow-md transform transition hover:scale-105"
+                className="px-8 py-3 bg-[#eebb4d] hover:bg-[#d4a248] text-white font-bold rounded-full text-xl transition-transform hover:scale-105 shadow-md"
               >
-                Try Again
+                Start Baking
               </button>
             </div>
           </div>
         )}
 
-      </div>
-      
-      {/* Footer Info */}
-      <div className="absolute bottom-2 text-orange-300 text-xs">
-        Powered by React & Gemini AI
-      </div>
+        {/* Game Over Overlay */}
+        {(gameState === GameState.GAME_OVER || gameState === GameState.LOADING_AI) && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/50 backdrop-blur-sm z-20">
+             <div className="bg-white p-8 rounded-2xl shadow-2xl text-center border-4 border-[#eebb4d] max-w-md w-full mx-4">
+                <h2 className="text-3xl font-bold text-[#8B4513] mb-4">Oven's Closed!</h2>
+                <div className="text-5xl font-bold text-[#eebb4d] mb-6">{score} pts</div>
+                
+                {gameState === GameState.LOADING_AI ? (
+                  <div className="animate-pulse text-gray-500 mb-6">Eggie is writing a message...</div>
+                ) : (
+                  <>
+                    <div className="bg-[#fdf6e3] p-4 rounded-xl mb-4 text-left">
+                      <p className="text-sm font-bold text-[#8B4513] mb-1">Eggie says:</p>
+                      <p className="text-gray-700 italic">"{aiMessage}"</p>
+                    </div>
+                    {aiRecipe && (
+                      <div className="bg-[#fdf6e3] p-4 rounded-xl mb-6 text-left text-sm">
+                        <p className="font-bold text-[#8B4513] mb-1">Unlock Reward:</p>
+                        <div className="text-gray-700 whitespace-pre-wrap">{aiRecipe}</div>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <button 
+                  onClick={startGame}
+                  className="px-8 py-3 bg-[#eebb4d] hover:bg-[#d4a248] text-white font-bold rounded-full text-xl transition-transform hover:scale-105 shadow-md"
+                >
+                  Bake Again
+                </button>
+             </div>
+          </div>
+        )}
     </div>
   );
 };
